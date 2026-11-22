@@ -1,15 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ATMOSPHERIC_PRESSURE_KPA,
+  DEFAULT_THRESHOLDS,
+  DEMO_DAM_CRACKS,
   classifySeverity,
   computeAcousticScore,
   computeCrackWidthMm,
+  computeDepthFromPressureKpa,
+  computePressureKpaFromDepth,
   computeScaleMmPerPx,
-  DEMO_DAM_CRACKS,
+  computeThrusterPwm,
   findStraddledCrack,
   measureCrackFromRov,
 } from './crackAnalysis';
 import { evaluateGuidedDemo, GUIDED_DEMO_DURATION_SEC } from './guidedDemo';
+import { buildPartInspectionDetails } from './partInspector';
 
 test('computeScaleMmPerPx uses 50 / dot_distance_px', () => {
   assert.equal(computeScaleMmPerPx(250), 0.2);
@@ -43,6 +49,73 @@ test('classifySeverity respects default and custom thresholds', () => {
   assert.equal(classifySeverity(0.45, custom), 'Minor');
   assert.equal(classifySeverity(1.2, custom), 'Moderate');
   assert.equal(classifySeverity(1.6, custom), 'Critical');
+});
+
+test('DEMO_DAM_CRACKS classify via shared classifySeverity: C-01 Minor, C-02 Moderate, C-03 Critical (leak), C-04 Critical', () => {
+  const byId = Object.fromEntries(
+    DEMO_DAM_CRACKS.map((crack) => [
+      crack.id,
+      {
+        crack,
+        severity: classifySeverity(crack.trueWidthMm, DEFAULT_THRESHOLDS),
+        measured: measureCrackFromRov(crack, 0.8, DEFAULT_THRESHOLDS),
+      },
+    ]),
+  );
+
+  assert.equal(byId['C-01'].severity, 'Minor');
+  assert.equal(byId['C-01'].measured.severity, 'Minor');
+
+  assert.equal(byId['C-02'].severity, 'Moderate');
+  assert.equal(byId['C-02'].measured.severity, 'Moderate');
+
+  assert.equal(byId['C-03'].severity, 'Critical');
+  assert.equal(byId['C-03'].measured.severity, 'Critical');
+  assert.equal(byId['C-03'].crack.hasLeak, true);
+
+  assert.equal(byId['C-04'].severity, 'Critical');
+  assert.equal(byId['C-04'].measured.severity, 'Critical');
+});
+
+test('pressure sensor uses depth = (P - P0) / (997 * 9.81)', () => {
+  const p0 = ATMOSPHERIC_PRESSURE_KPA;
+  const pAtHalfM = computePressureKpaFromDepth(0.5, p0);
+  const depth = computeDepthFromPressureKpa(pAtHalfM, p0);
+  assert.ok(Math.abs(depth - 0.5) < 1e-6, `Expected 0.50 m, got ${depth}`);
+});
+
+test('thruster PWM responds to pilot horizontal and vertical inputs', () => {
+  const idle = computeThrusterPwm({ vx: 0, vy: 0 }, false);
+  assert.equal(idle.aftSurgePct, 0);
+
+  const diving = computeThrusterPwm({ vx: 1, vy: 1 }, true);
+  assert.ok(diving.aftSurgePct > 50);
+  assert.ok(diving.foreHeavePct > idle.foreHeavePct);
+  assert.ok(diving.aftHeavePct > idle.aftHeavePct);
+});
+
+test('buildPartInspectionDetails produces expected live data, status, and AWS targets', () => {
+  const ctx = {
+    rov: { xM: 0.8, depthM: 0.68 },
+    cracks: DEMO_DAM_CRACKS,
+    thresholds: DEFAULT_THRESHOLDS,
+    pilotVector: { vx: 0, vy: 1 },
+    isMoving: true,
+    straddledCrack: DEMO_DAM_CRACKS[2],
+  };
+
+  const c03 = buildPartInspectionDetails('crack-C-03', ctx);
+  assert.equal(c03.severity, 'Critical');
+  assert.equal(c03.status, 'Alert');
+  assert.ok(c03.readings.some((r) => r.label === 'Active Leak' && r.value.startsWith('Yes')));
+
+  const tether = buildPartInspectionDetails('tether', ctx);
+  assert.ok(tether.summary.toLowerCase().includes('wireless'));
+  assert.ok(tether.readings.some((r) => r.value.toLowerCase().includes('no wireless underwater')));
+
+  const piezo = buildPartInspectionDetails('piezo', ctx);
+  assert.equal(piezo.status, 'Alert');
+  assert.ok(piezo.awsService.includes('IoT Core'));
 });
 
 test('findStraddledCrack locks onto crack when within wall range and vertical tolerance', () => {
@@ -84,11 +157,4 @@ test('evaluateGuidedDemo covers full 90-second run with Critical, delta, and rec
   const end = evaluateGuidedDemo(GUIDED_DEMO_DURATION_SEC);
   assert.equal(end.completed, true);
   assert.equal(end.progressPct, 100);
-});
-
-test('DEMO_DAM_CRACKS contains 4 cracks with expected growth delta on C-04', () => {
-  assert.equal(DEMO_DAM_CRACKS.length, 4);
-  const c4 = DEMO_DAM_CRACKS.find((c) => c.id === 'C-04');
-  assert.ok(c4);
-  assert.equal(Number((c4.trueWidthMm - (c4.previousWidthMm ?? 0)).toFixed(1)), 0.4);
 });

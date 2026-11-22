@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Info,
   OctagonAlert,
   Pause,
   Play,
@@ -15,19 +16,22 @@ import {
 import {
   DEMO_DAM_CRACKS,
   DamCrack,
+  PilotInputVector,
   ROV_BOUNDS,
   RovState,
   SeverityThresholds,
   clampRovPosition,
   computeAcousticScore,
-  computeSimulatedDotDistancePx,
   computeScaleMmPerPx,
+  computeSimulatedDotDistancePx,
   findStraddledCrack,
 } from '../lib/crackAnalysis';
 import { GUIDED_DEMO_DURATION_SEC, evaluateGuidedDemo } from '../lib/guidedDemo';
+import { InspectablePartId, buildPartInspectionDetails } from '../lib/partInspector';
 import { RealInspectionResult } from '../lib/realApi';
 import { CameraInsetCard } from './CameraInsetCard';
 import { DamSceneSvg } from './DamSceneSvg';
+import { PartInspectorPanel } from './PartInspectorPanel';
 
 interface ShowcaseTabProps {
   thresholds: SeverityThresholds;
@@ -47,6 +51,11 @@ function formatTimer(seconds: number): string {
 export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: ShowcaseTabProps) {
   const [rov, setRov] = useState<RovState>(INITIAL_ROV);
   const [isMoving, setIsMoving] = useState(false);
+  const [pilotVector, setPilotVector] = useState<PilotInputVector>({ vx: 0, vy: 0 });
+
+  // Part Inspector hover & pinned selection
+  const [pinnedPartId, setPinnedPartId] = useState<InspectablePartId | null>(null);
+  const [hoveredPartId, setHoveredPartId] = useState<InspectablePartId | null>(null);
 
   // Guided demo state
   const [demoState, setDemoState] = useState<'idle' | 'playing' | 'paused' | 'completed'>('idle');
@@ -65,18 +74,26 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
   // Held pilot direction (from keyboard or pointer hold)
   const heldDirectionRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
   const moveTimeoutRef = useRef<number | null>(null);
+  const prevDemoRovRef = useRef<RovState>(INITIAL_ROV);
 
   const nudgeRov = useCallback((dx: number, dy: number) => {
     setDemoState((prev) => (prev === 'playing' ? 'paused' : prev));
     setRov((prev) => clampRovPosition({ xM: prev.xM + dx, depthM: prev.depthM + dy }));
     setIsMoving(true);
+    setPilotVector({
+      vx: dx === 0 ? 0 : dx > 0 ? 1 : -1,
+      vy: dy === 0 ? 0 : dy > 0 ? 1 : -1,
+    });
     if (moveTimeoutRef.current !== null) {
       window.clearTimeout(moveTimeoutRef.current);
     }
-    moveTimeoutRef.current = window.setTimeout(() => setIsMoving(false), 180);
+    moveTimeoutRef.current = window.setTimeout(() => {
+      setIsMoving(false);
+      setPilotVector({ vx: 0, vy: 0 });
+    }, 220);
   }, []);
 
-  // Keyboard Arrow / WASD piloting
+  // Esc key closes pinned part inspector; Arrow / WASD keys pilot ROV
   useEffect(() => {
     const pressedKeys = new Set<string>();
 
@@ -91,15 +108,21 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPinnedPartId(null);
+        return;
+      }
       const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')
+      ) {
         return;
       }
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
         e.preventDefault();
         pressedKeys.add(e.key);
         updateHeldVector();
-        // Immediate responsive step on keydown
         const stepX = e.key === 'ArrowLeft' ? -0.03 : e.key === 'ArrowRight' ? 0.03 : 0;
         const stepY = e.key === 'ArrowUp' ? -0.025 : e.key === 'ArrowDown' ? 0.025 : 0;
         if (stepX !== 0 || stepY !== 0) {
@@ -124,20 +147,20 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
     };
   }, [nudgeRov]);
 
-  // Continuous hold piloting loop (capped ~30fps to stay battery-friendly on mobile)
+  // Continuous hold piloting loop (~30fps)
   useEffect(() => {
-    let timerId: number | null = null;
-    timerId = window.setInterval(() => {
+    const timerId = window.setInterval(() => {
       const { dx, dy } = heldDirectionRef.current;
       if (dx !== 0 || dy !== 0) {
         setDemoState((prev) => (prev === 'playing' ? 'paused' : prev));
-        setRov((prev) => clampRovPosition({ xM: prev.xM + dx * 0.018, depthM: prev.depthM + dy * 0.015 }));
+        setRov((prev) =>
+          clampRovPosition({ xM: prev.xM + dx * 0.018, depthM: prev.depthM + dy * 0.015 }),
+        );
         setIsMoving(true);
+        setPilotVector({ vx: dx, vy: dy });
       }
     }, 33);
-    return () => {
-      if (timerId !== null) window.clearInterval(timerId);
-    };
+    return () => window.clearInterval(timerId);
   }, []);
 
   // 90-second Guided Demo playback loop
@@ -153,8 +176,19 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
       setDemoElapsedSec((prev) => {
         const next = Math.min(GUIDED_DEMO_DURATION_SEC, prev + dt);
         const frame = evaluateGuidedDemo(next);
+        const dx = frame.rov.xM - prevDemoRovRef.current.xM;
+        const dy = frame.rov.depthM - prevDemoRovRef.current.depthM;
+        prevDemoRovRef.current = frame.rov;
         setRov(frame.rov);
         setIsMoving(!frame.completed);
+        setPilotVector(
+          frame.completed
+            ? { vx: 0, vy: 0 }
+            : {
+                vx: Math.abs(dx) > 0.0005 ? (dx > 0 ? 0.7 : -0.7) : 0,
+                vy: Math.abs(dy) > 0.0005 ? (dy > 0 ? 0.8 : -0.8) : 0,
+              },
+        );
         if (frame.completed) {
           setDemoState('completed');
         }
@@ -174,6 +208,17 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
   const dotDistancePx = computeSimulatedDotDistancePx(rov.xM);
   const currentScaleMmPerPx = computeScaleMmPerPx(dotDistancePx);
 
+  const partCtx = {
+    rov,
+    cracks: DEMO_DAM_CRACKS,
+    thresholds,
+    pilotVector,
+    isMoving,
+    straddledCrack,
+  };
+  const pinnedDetails = pinnedPartId ? buildPartInspectionDetails(pinnedPartId, partCtx) : null;
+  const hoveredDetails = hoveredPartId ? buildPartInspectionDetails(hoveredPartId, partCtx) : null;
+
   const handleStartGuidedDemo = () => {
     if (demoState === 'completed') {
       setDemoElapsedSec(0);
@@ -188,6 +233,7 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
   const handleRestartDemo = () => {
     setDemoElapsedSec(0);
     const frame = evaluateGuidedDemo(0);
+    prevDemoRovRef.current = frame.rov;
     setRov(frame.rov);
     setDemoState('playing');
   };
@@ -201,6 +247,8 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
     setDemoState('idle');
     setDemoElapsedSec(0);
     setRov(INITIAL_ROV);
+    setPilotVector({ vx: 0, vy: 0 });
+    setIsMoving(false);
   };
 
   const bindHoldButton = (dx: number, dy: number) => ({
@@ -211,23 +259,27 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
     onPointerUp: () => {
       heldDirectionRef.current = { dx: 0, dy: 0 };
       setIsMoving(false);
+      setPilotVector({ vx: 0, vy: 0 });
     },
     onPointerLeave: () => {
       heldDirectionRef.current = { dx: 0, dy: 0 };
       setIsMoving(false);
+      setPilotVector({ vx: 0, vy: 0 });
     },
     onPointerCancel: () => {
       heldDirectionRef.current = { dx: 0, dy: 0 };
       setIsMoving(false);
+      setPilotVector({ vx: 0, vy: 0 });
     },
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" onClick={() => setPinnedPartId(null)}>
       {/* Guided Demo Control & Caption Strip */}
       <section
         aria-label="Guided Demo Controls"
         className="rounded-xl border border-slate-300 dark:border-slate-800 bg-slate-100 dark:bg-[#0F1623] p-4 sm:p-5 space-y-4"
+        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-1">
@@ -240,7 +292,7 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
               </span>
             </div>
             <p className="text-sm text-slate-700 dark:text-slate-300">
-              Pilot Sea Lion across the fictional dam face with arrow keys or touch controls, or run the 90-second Guided Demo.
+              Pilot Sea Lion with arrow keys or touch buttons, or hover/tap any sensor, thruster, tether, shore unit, or crack to inspect it.
             </p>
           </div>
 
@@ -321,8 +373,8 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
 
       {/* Main Two-Zone Simulation Split */}
       <div className="grid gap-6 lg:grid-cols-12 items-start">
-        {/* Left Zone: Interactive Dam Cross-Section + Honesty & Screening Limits */}
-        <div className="lg:col-span-8 space-y-4">
+        {/* Left Top Zone: Interactive Dam Cross-Section + Interactive Hint */}
+        <div className="lg:col-span-8 lg:row-start-1 space-y-3">
           <DamSceneSvg
             rov={rov}
             cracks={DEMO_DAM_CRACKS}
@@ -331,36 +383,34 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
             thresholds={thresholds}
             isMoving={isMoving}
             prefersReducedMotion={prefersReducedMotion}
-            onSelectCrack={handleSnapToCrack}
+            pinnedPartId={pinnedPartId}
+            hoveredPartId={hoveredPartId}
+            hoveredDetails={hoveredDetails}
+            onSelectPart={setPinnedPartId}
+            onHoverPart={setHoveredPartId}
           />
 
-          {/* Engineering Scope & Honesty Limits */}
-          <section
-            aria-label="Simulation Honesty and Engineering Limits"
-            className="rounded-xl border border-slate-300 dark:border-slate-800 bg-slate-100 dark:bg-[#0F1623] p-5 space-y-2.5"
-          >
-            <div className="flex items-center gap-2">
-              <ShieldAlert className="h-5 w-5 text-amber-700 dark:text-amber-400 shrink-0" aria-hidden="true" />
-              <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">
-                Simulation Scope &amp; Screening Limits
-              </h2>
-            </div>
-            <ul className="list-disc pl-5 space-y-1 text-sm text-slate-700 dark:text-slate-300">
-              <li>
-                All depth, acoustic, and crack width readouts in Showcase are <strong>SIMULATED</strong> for a fictional dam and are never saved to History or Compare.
-              </li>
-              <li>
-                Optical calibration (<span className="font-mono">mm/px = 50 / dot_distance_px</span>) assumes the ROV camera is roughly perpendicular to the concrete wall.
-              </li>
-              <li>
-                Designed for shallow-water screening (~1 m depth) and demonstration only — makes no claims about real-world measurement accuracy and never replaces certified structural or ultrasonic NDT inspection.
-              </li>
-            </ul>
-          </section>
+          {/* Subtle interactive instruction line */}
+          <div className="flex items-center gap-2 text-xs sm:text-sm text-slate-700 dark:text-slate-300 px-1">
+            <Info className="h-4 w-4 text-sky-700 dark:text-cyan-400 shrink-0" aria-hidden="true" />
+            <span>
+              Interactive parts: tap or press Enter on Camera, 50 mm Lasers, Piezo Hydrophone, Pressure Sensor, 3 Thrusters, Tether, Shore Unit, or Cracks C-01–C-04 to pin live SIMULATED telemetry.
+            </span>
+          </div>
         </div>
 
-        {/* Right Zone: Pilot D-Pad, Live Telemetry, Acoustic Leak Bar & Camera Inset */}
-        <div className="lg:col-span-4 space-y-4">
+        {/* Right Zone (spans full height on desktop; appears right below SVG on mobile): Pinned Part Inspector + Pilot D-Pad + Acoustic Leak Bar + Camera Inset */}
+        <div
+          className="lg:col-span-4 lg:col-start-9 lg:row-start-1 lg:row-span-2 space-y-4"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {pinnedDetails && (
+            <PartInspectorPanel
+              details={pinnedDetails}
+              onClose={() => setPinnedPartId(null)}
+            />
+          )}
+
           {/* Telemetry & Pilot Controls Card */}
           <section
             aria-label="ROV Pilot Controls and Simulated Telemetry"
@@ -521,6 +571,37 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
             onRealAnalysisComplete={onRealAnalysisComplete}
           />
         </div>
+
+        {/* Left Bottom Zone: Engineering Scope & Honesty Limits */}
+        <section
+          aria-label="Simulation Honesty and Engineering Limits"
+          className="lg:col-span-8 lg:row-start-2 rounded-xl border border-slate-300 dark:border-slate-800 bg-slate-100 dark:bg-[#0F1623] p-5 space-y-2.5"
+        >
+          <div className="flex items-center gap-2">
+            <ShieldAlert
+              className="h-5 w-5 text-amber-700 dark:text-amber-400 shrink-0"
+              aria-hidden="true"
+            />
+            <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">
+              Simulation Scope &amp; Screening Limits
+            </h2>
+          </div>
+          <ul className="list-disc pl-5 space-y-1 text-sm text-slate-700 dark:text-slate-300">
+            <li>
+              All depth, pressure, thruster, acoustic, and crack width readouts in Showcase are{' '}
+              <strong>SIMULATED</strong> for a fictional dam and are never saved to History or Compare.
+            </li>
+            <li>
+              Optical calibration (<span className="font-mono">mm/px = 50 / dot_distance_px</span>)
+              assumes the ROV camera is roughly perpendicular to the concrete wall.
+            </li>
+            <li>
+              Designed for shallow-water screening (~1 m depth) and demonstration only — makes no
+              claims about real-world measurement accuracy and never replaces certified structural or
+              ultrasonic NDT inspection.
+            </li>
+          </ul>
+        </section>
       </div>
     </div>
   );

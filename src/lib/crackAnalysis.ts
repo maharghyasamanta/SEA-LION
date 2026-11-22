@@ -242,3 +242,74 @@ export function clampRovPosition(rov: RovState): RovState {
     depthM: Number(Math.min(ROV_BOUNDS.maxDepthM, Math.max(ROV_BOUNDS.minDepthM, rov.depthM)).toFixed(3)),
   };
 }
+
+export const WATER_DENSITY_KG_M3 = 997;
+export const GRAVITY_M_S2 = 9.81;
+export const ATMOSPHERIC_PRESSURE_KPA = 101.325;
+
+/**
+ * Converts depth (m) to absolute hydrostatic pressure (kPa):
+ * P = P0 + (997 * 9.81 * depth) / 1000
+ */
+export function computePressureKpaFromDepth(
+  depthM: number,
+  p0Kpa = ATMOSPHERIC_PRESSURE_KPA,
+): number {
+  return p0Kpa + (WATER_DENSITY_KG_M3 * GRAVITY_M_S2 * Math.max(0, depthM)) / 1000;
+}
+
+/**
+ * Real Sea Lion hydrostatic depth equation:
+ * depth = (P - P0) / (997 * 9.81)  [where P and P0 are in Pa = kPa * 1000]
+ */
+export function computeDepthFromPressureKpa(
+  pressureKpa: number,
+  p0Kpa = ATMOSPHERIC_PRESSURE_KPA,
+): number {
+  const deltaPa = (pressureKpa - p0Kpa) * 1000;
+  return Math.max(0, deltaPa / (WATER_DENSITY_KG_M3 * GRAVITY_M_S2));
+}
+
+export interface PilotInputVector {
+  /** Horizontal input: -1 (left/reverse) to +1 (right/forward) */
+  vx: number;
+  /** Vertical input: -1 (up/surface) to +1 (down/dive) */
+  vy: number;
+}
+
+export interface ThrusterPwmReadings {
+  aftSurgePct: number;
+  foreHeavePct: number;
+  aftHeavePct: number;
+}
+
+/**
+ * Computes simulated PWM % (0-100) per thruster based on pilot input vector.
+ * Sea Lion uses 3 thrusters: 1 aft surge + 2 vertical heave thrusters.
+ */
+export function computeThrusterPwm(
+  input: PilotInputVector,
+  isActive: boolean,
+): ThrusterPwmReadings {
+  const baseTrim = 12; // gentle neutral buoyancy / station-keeping trim %
+  if (!isActive && input.vx === 0 && input.vy === 0) {
+    return {
+      aftSurgePct: 0,
+      foreHeavePct: baseTrim,
+      aftHeavePct: baseTrim,
+    };
+  }
+
+  const surge = Math.min(95, Math.round(Math.abs(input.vx) * 76));
+  // Diving down pushes downward (higher positive heave PWM); surfacing reverses/unloads heave
+  const heaveDelta = input.vy > 0 ? 64 * input.vy : input.vy < 0 ? 48 * Math.abs(input.vy) : 0;
+  const foreHeave = Math.min(96, Math.round(baseTrim + heaveDelta));
+  const aftHeave = Math.min(96, Math.round(baseTrim + heaveDelta * 0.96));
+
+  return {
+    aftSurgePct: surge,
+    foreHeavePct: foreHeave,
+    aftHeavePct: aftHeave,
+  };
+}
+
