@@ -3,10 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Moon, RefreshCw, Sun } from 'lucide-react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import {
+  Activity,
+  AlertTriangle,
+  Box,
+  CheckCircle2,
+  GitCompare,
+  History as HistoryIcon,
+  Moon,
+  PlaySquare,
+  RefreshCw,
+  ScanSearch,
+  Sun,
+} from 'lucide-react';
 import { DEFAULT_THRESHOLDS, SeverityThresholds } from './lib/crackAnalysis';
 import { RealInspectionResult } from './lib/realApi';
+import { ChunkErrorBoundary } from './components/ChunkErrorBoundary';
 import { ShowcaseTab } from './components/ShowcaseTab';
 import {
   CompareTab,
@@ -16,14 +29,22 @@ import {
   TelemetryTab,
 } from './components/WorkspaceTabs';
 
-type TabId = 'inspect' | 'history' | 'compare' | 'telemetry' | 'showcase';
+const Model3DTab = lazy(() => import('./components/Model3DTab'));
 
-const NAV_TABS: readonly { id: TabId; label: string }[] = [
-  { id: 'inspect', label: 'Inspect' },
-  { id: 'history', label: 'History' },
-  { id: 'compare', label: 'Compare' },
-  { id: 'telemetry', label: 'Telemetry' },
-  { id: 'showcase', label: 'Showcase' },
+type TabId = 'inspect' | 'history' | 'compare' | 'telemetry' | 'showcase' | 'model-3d';
+
+const NAV_TABS: readonly {
+  id: TabId;
+  label: string;
+  shortLabel: string;
+  Icon: typeof ScanSearch;
+}[] = [
+  { id: 'inspect', label: 'Inspect', shortLabel: 'Inspect', Icon: ScanSearch },
+  { id: 'history', label: 'History', shortLabel: 'History', Icon: HistoryIcon },
+  { id: 'compare', label: 'Compare', shortLabel: 'Compare', Icon: GitCompare },
+  { id: 'telemetry', label: 'Telemetry', shortLabel: 'Live', Icon: Activity },
+  { id: 'showcase', label: 'Showcase', shortLabel: 'Demo', Icon: PlaySquare },
+  { id: 'model-3d', label: '3D Model', shortLabel: '3D', Icon: Box },
 ];
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
@@ -42,8 +63,9 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState<TabId>(getInitialTab);
   const [thresholds, setThresholds] = useState<SeverityThresholds>(DEFAULT_THRESHOLDS);
+  const [chunkRetryKey, setChunkRetryKey] = useState(0);
 
-  // Strictly real API records only; Showcase simulations are never added here.
+  // Strictly real API records only; Showcase and 3D Model simulations are never added here.
   const [realInspections, setRealInspections] = useState<RealInspectionResult[]>([]);
 
   // Stage 1 /health check state
@@ -100,7 +122,7 @@ export default function App() {
     <div className="min-h-screen bg-white text-slate-950 dark:bg-[#070B12] dark:text-slate-50 transition-colors duration-150">
       {/* Three-Zone Top Navigation Bar */}
       <header className="border-b border-slate-300 dark:border-slate-800 bg-white/95 dark:bg-[#070B12]/95 print:hidden">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-8 px-4 py-3 sm:px-6">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 sm:gap-8 px-4 py-2 sm:py-3 sm:px-6">
           <button
             type="button"
             onClick={() => setActiveTab('showcase')}
@@ -111,7 +133,7 @@ export default function App() {
 
           <nav
             aria-label="Primary"
-            className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-700 dark:text-slate-300"
+            className="hidden md:flex items-center gap-5 lg:gap-6 text-sm font-medium text-slate-700 dark:text-slate-300"
           >
             {NAV_TABS.map((tab) => {
               const isActive = activeTab === tab.id;
@@ -140,33 +162,35 @@ export default function App() {
               setActiveTab('telemetry');
             }}
             disabled={loading}
-            className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg bg-sky-700 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-800 dark:bg-cyan-500 dark:text-slate-950 dark:hover:bg-cyan-400 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 cursor-pointer"
+            className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg bg-sky-700 px-3.5 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white hover:bg-sky-800 dark:bg-cyan-500 dark:text-slate-950 dark:hover:bg-cyan-400 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 cursor-pointer"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
             <span>Test /health</span>
           </button>
         </div>
 
-        {/* Mobile Tab Strip (44px+ touch targets, all 5 visible without clipping) */}
+        {/* Mobile Compact 6-Tab Icon + Short-Label Bar (<= 15% viewport height, 44px+ targets) */}
         <nav
           aria-label="Mobile Navigation"
-          className="grid md:hidden grid-cols-5 gap-1 border-t border-slate-200 dark:border-slate-800 px-2 py-2"
+          className="grid md:hidden grid-cols-6 gap-1 border-t border-slate-200 dark:border-slate-800 px-1.5 py-1.5"
         >
-          {NAV_TABS.map((tab) => {
-            const isActive = activeTab === tab.id;
+          {NAV_TABS.map(({ id, label, shortLabel, Icon }) => {
+            const isActive = activeTab === id;
             return (
               <button
-                key={tab.id}
+                key={id}
                 type="button"
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => setActiveTab(id)}
+                aria-label={label}
                 aria-current={isActive ? 'page' : undefined}
-                className={`min-h-[44px] px-1.5 py-2 text-xs font-medium rounded-lg text-center whitespace-nowrap cursor-pointer ${
+                className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 px-1 py-1 text-[11px] leading-tight rounded-md text-center whitespace-nowrap cursor-pointer border-b-2 transition-colors ${
                   isActive
-                    ? 'bg-sky-700 text-white dark:bg-cyan-500 dark:text-slate-950 font-semibold'
-                    : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    ? 'border-sky-900 dark:border-cyan-200 bg-sky-700 text-white dark:bg-cyan-500 dark:text-slate-950 font-bold underline underline-offset-2'
+                    : 'border-transparent text-slate-700 dark:text-slate-300 font-medium hover:bg-slate-100 dark:hover:bg-slate-800'
                 }`}
               >
-                {tab.label}
+                <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>{shortLabel}</span>
               </button>
             );
           })}
@@ -228,6 +252,31 @@ export default function App() {
             apiBase={API_BASE}
             onRealAnalysisComplete={handleRealAnalysisComplete}
           />
+        )}
+
+        {activeTab === 'model-3d' && (
+          <ChunkErrorBoundary
+            key={chunkRetryKey}
+            onRetry={() => setChunkRetryKey((k) => k + 1)}
+          >
+            <Suspense
+              fallback={
+                <div
+                  role="status"
+                  className="rounded-xl border border-slate-300 dark:border-slate-800 bg-slate-100 dark:bg-[#0F1623] p-8 text-center space-y-2"
+                >
+                  <p className="text-base font-semibold text-slate-950 dark:text-slate-50">
+                    Loading Interactive 3D ROV Model...
+                  </p>
+                  <p className="text-xs text-slate-600 dark:text-slate-400">
+                    Initializing procedural Three.js hardware geometry.
+                  </p>
+                </div>
+              }
+            >
+              <Model3DTab darkMode={darkMode} />
+            </Suspense>
+          </ChunkErrorBoundary>
         )}
 
         {activeTab === 'inspect' && (
