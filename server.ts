@@ -22,6 +22,20 @@ async function startDevServer() {
     });
   });
 
+  app.post("/api/upload-url", (_req, res) => {
+    res.status(501).json({
+      error: "Stage 2 analysis API (/upload-url) is not deployed in this Stage 1 environment.",
+      stage: "stage-1-hello-world",
+    });
+  });
+
+  app.get("/api/inspections/:id", (req, res) => {
+    res.status(501).json({
+      error: `Stage 2 inspection polling (/inspections/${req.params.id}) is not deployed in this Stage 1 environment.`,
+      stage: "stage-1-hello-world",
+    });
+  });
+
   const vite = await createViteServer({
     server: { middlewareMode: true },
     appType: "spa",
