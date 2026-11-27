@@ -13,7 +13,6 @@ interface CameraInsetCardProps {
   straddledCrack: DamCrack | null;
   rovXM: number;
   thresholds: SeverityThresholds;
-  apiBase: string;
   showRecommendation: boolean;
   showReinspectionDelta: boolean;
   cracks: readonly DamCrack[];
@@ -25,7 +24,6 @@ export function CameraInsetCard({
   straddledCrack,
   rovXM,
   thresholds,
-  apiBase,
   showRecommendation,
   showReinspectionDelta,
   cracks,
@@ -49,11 +47,10 @@ export function CameraInsetCard({
     setAnalyzedCrackId(crack.id);
     setProgressText('Preparing sample upload...');
     try {
-      const filename = crack.sampleImagePath.split('/').pop() ?? `${crack.id.toLowerCase()}.png`;
+      const filename = crack.sampleImagePath.split('/').pop() ?? `${crack.id.toLowerCase()}.jpg`;
       const result = await runRealCrackAnalysis({
         sampleImagePath: crack.sampleImagePath,
         filename,
-        apiBase,
         onProgress: (msg) => setProgressText(msg),
       });
       setRealResult(result);
@@ -277,19 +274,19 @@ export function CameraInsetCard({
           {analyzing ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin shrink-0" aria-hidden="true" />
-              <span>Analyzing sample...</span>
+              <span>Measuring on AWS...</span>
             </>
           ) : (
             <>
               <Play className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>Run real analysis ({straddledCrack.id})</span>
+              <span>Measure this sample on AWS ({straddledCrack.id})</span>
             </>
           )}
         </button>
         <p className="text-[11px] text-slate-600 dark:text-slate-400">
-          Sends <span className="font-mono">{straddledCrack.sampleImagePath}</span> via{' '}
-          <span className="font-mono">POST /upload-url</span> &rarr; poll{' '}
-          <span className="font-mono">/inspections/&#123;id&#125;</span>.
+          Uploads <span className="font-mono">{straddledCrack.sampleImagePath}</span> to S3, measures
+          the aperture along the reference trace in Lambda, and persists the record to DynamoDB.
+          The 3D view above remains a simulation.
         </p>
 
         {progressText && analyzedCrackId === straddledCrack.id && (
@@ -303,7 +300,7 @@ export function CameraInsetCard({
           >
             <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
             <div>
-              <p className="font-semibold">Real API unavailable — simulation still running</p>
+              <p className="font-semibold">AWS measurement unavailable</p>
               <p className="mt-0.5">{apiError}</p>
             </div>
           </div>
@@ -313,9 +310,18 @@ export function CameraInsetCard({
           <div className="rounded-lg border border-emerald-400 dark:border-emerald-700 bg-emerald-100 dark:bg-emerald-950/50 p-3 text-xs text-emerald-950 dark:text-emerald-200 flex items-start gap-2">
             <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
             <div>
-              <p className="font-semibold">Real API analysis complete ({realResult.id})</p>
+              <p className="font-semibold">
+                {realResult.status === 'REVIEW_REQUIRED'
+                  ? 'Review required — no confident aperture'
+                  : 'AWS measurement complete'}{' '}
+                ({realResult.id})
+              </p>
               <p className="mt-0.5 font-mono">
-                Measured: {realResult.widthMm?.toFixed(2) ?? '—'} mm
+                Median {realResult.medianWidthMm?.toFixed(2) ?? '—'} mm · P90{' '}
+                {realResult.widthMm?.toFixed(2) ?? '—'} mm · confidence {realResult.confidence ?? '—'}%
+              </p>
+              <p className="mt-1 text-[11px]">
+                Operator-guided estimate. Confirm with a field scale and a qualified engineer.
               </p>
             </div>
           </div>

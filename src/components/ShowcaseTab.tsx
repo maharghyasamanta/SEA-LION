@@ -35,7 +35,6 @@ import { PartInspectorPanel } from './PartInspectorPanel';
 
 interface ShowcaseTabProps {
   thresholds: SeverityThresholds;
-  apiBase: string;
   onRealAnalysisComplete: (result: RealInspectionResult) => void;
 }
 
@@ -48,7 +47,7 @@ function formatTimer(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: ShowcaseTabProps) {
+export function ShowcaseTab({ thresholds, onRealAnalysisComplete }: ShowcaseTabProps) {
   const [rov, setRov] = useState<RovState>(INITIAL_ROV);
   const [isMoving, setIsMoving] = useState(false);
   const [pilotVector, setPilotVector] = useState<PilotInputVector>({ vx: 0, vy: 0 });
@@ -563,7 +562,6 @@ export function ShowcaseTab({ thresholds, apiBase, onRealAnalysisComplete }: Sho
             straddledCrack={straddledCrack}
             rovXM={rov.xM}
             thresholds={thresholds}
-            apiBase={apiBase}
             showRecommendation={demoFrame?.showRecommendation ?? false}
             showReinspectionDelta={demoFrame?.showReinspectionDelta ?? false}
             cracks={DEMO_DAM_CRACKS}

@@ -1,8 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Sea Lion Stage 1 Hello-World Stack (ap-south-1, AWS Free Tier).
-  Deploys HTTP API (/health), Python 3.12 Lambda, and private S3 + CloudFront (OAC) static site.
+  S.E.A.-L.I.O.N. — Submerged Engineering & Aquatic Leak-Inspection Network.
+  Stage 2 Production Stack (ap-south-1, AWS Free Tier Compliant).
+  Deploys HTTP API v2, 7 Python 3.12 Lambdas, DynamoDB On-Demand tables,
+  private S3 Inspections bucket with CORS/Lifecycle, and CloudFront OAC static site.
 
 Globals:
   Function:
@@ -11,44 +13,329 @@ Globals:
       - x86_64
     Timeout: 10
     MemorySize: 128
+    Tags:
+      Project: SeaLion
+      Hackathon: CampusToCloud2026
+    Environment:
+      Variables:
+        APP_STAGE: stage-2
+        AWS_REGION_NAME: !Ref "AWS::Region"
+        INSPECTIONS_BUCKET: !Ref SeaLionInspectionsBucket
+        INSPECTIONS_TABLE: !Ref SeaLionInspectionsTable
+        TELEMETRY_TABLE: !Ref SeaLionTelemetryTable
 
 Resources:
+  # ===========================================================================
+  # API GATEWAY HTTP API (v2)
+  # ===========================================================================
   SeaLionHttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: $default
       DefaultRouteSettings:
-        ThrottlingBurstLimit: 20
-        ThrottlingRateLimit: 10
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
       CorsConfiguration:
         AllowOrigins:
           - "*"
         AllowMethods:
           - GET
           - POST
+          - PUT
           - OPTIONS
         AllowHeaders:
           - Content-Type
           - Authorization
+          - X-Amz-Date
+          - X-Api-Key
         MaxAge: 600
 
+  # ===========================================================================
+  # S3 STORAGE — INSPECTIONS BUCKET (Free Tier, 30-Day Lifecycle, CORS)
+  # ===========================================================================
+  SeaLionInspectionsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - HEAD
+            AllowedOrigins:
+              - "*"
+            MaxAge: 3600
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireUploadsAfter30Days
+            Status: Enabled
+            Prefix: uploads/
+            ExpirationInDays: 30
+          - Id: ExpireAnnotatedAfter30Days
+            Status: Enabled
+            Prefix: annotated/
+            ExpirationInDays: 30
+          - Id: ExpireTempAfter30Days
+            Status: Enabled
+            Prefix: temp/
+            ExpirationInDays: 30
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            Prefix: ""
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # ===========================================================================
+  # DYNAMODB TABLES (On-Demand / Free Tier Eligible)
+  # ===========================================================================
+  SeaLionInspectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-inspections"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: asset_id
+          AttributeType: S
+        - AttributeName: inspection_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: asset_id
+          KeyType: HASH
+        - AttributeName: inspection_id
+          KeyType: RANGE
+
+  SeaLionTelemetryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-telemetry"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: unit_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: unit_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ===========================================================================
+  # LAMBDA HANDLERS (Python 3.12, Least-Privilege IAM)
+  # ===========================================================================
   HealthFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-health"
       CodeUri: backend/health/
       Handler: app.lambda_handler
-      Environment:
-        Variables:
-          APP_STAGE: stage-1-hello-world
+      Policies:
+        - Statement:
+            - Sid: HealthServiceCheck
+              Effect: Allow
+              Action:
+                - s3:ListBucket
+                - dynamodb:DescribeTable
+              Resource:
+                - !GetAtt SeaLionInspectionsBucket.Arn
+                - !GetAtt SeaLionInspectionsTable.Arn
+                - !GetAtt SeaLionTelemetryTable.Arn
       Events:
-        HealthGet:
+        HealthApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/health
+            Method: GET
+        HealthRoot:
           Type: HttpApi
           Properties:
             ApiId: !Ref SeaLionHttpApi
             Path: /health
             Method: GET
 
+  PresignUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-presign"
+      CodeUri: backend/presign/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Sid: S3PresignPut
+              Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource:
+                - !Sub "${SeaLionInspectionsBucket.Arn}/*"
+      Events:
+        PresignPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/uploads/presign
+            Method: POST
+        PresignLegacyPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/upload-url
+            Method: POST
+
+  AnalyzeInspectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-analyze"
+      CodeUri: backend/analyze/
+      Handler: app.lambda_handler
+      Timeout: 30
+      MemorySize: 512
+      Policies:
+        - Statement:
+            - Sid: S3ObjectAccess
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                - !Sub "${SeaLionInspectionsBucket.Arn}/*"
+            - Sid: DynamoDBRecordWrite
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt SeaLionInspectionsTable.Arn
+      Events:
+        AnalyzePost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/inspections/analyze
+            Method: POST
+
+  ListInspectionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-inspections-list"
+      CodeUri: backend/inspections/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Sid: DynamoDBReadInspections
+              Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt SeaLionInspectionsTable.Arn
+            - Sid: S3PresignGet
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Sub "${SeaLionInspectionsBucket.Arn}/*"
+      Events:
+        ListGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/inspections
+            Method: GET
+        DetailGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/inspections/{id}
+            Method: GET
+
+  CompareInspectionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-compare"
+      CodeUri: backend/compare/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Sid: DynamoDBReadCompare
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+              Resource:
+                - !GetAtt SeaLionInspectionsTable.Arn
+      Events:
+        ComparePost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/inspections/compare
+            Method: POST
+
+  TelemetryIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-telemetry-ingest"
+      CodeUri: backend/telemetry_ingest/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Sid: DynamoDBWriteTelemetry
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource:
+                - !GetAtt SeaLionTelemetryTable.Arn
+      Events:
+        IngestPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/telemetry/ingest
+            Method: POST
+
+  TelemetryLatestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-telemetry-latest"
+      CodeUri: backend/telemetry_latest/
+      Handler: app.lambda_handler
+      Policies:
+        - Statement:
+            - Sid: DynamoDBReadTelemetry
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource:
+                - !GetAtt SeaLionTelemetryTable.Arn
+      Events:
+        LatestGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref SeaLionHttpApi
+            Path: /api/telemetry/latest
+            Method: GET
+
+  # ===========================================================================
+  # STATIC FRONTEND HOSTING — S3 + CLOUDFRONT OAC (Edge Delivery)
+  # ===========================================================================
   FrontendBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -97,7 +384,6 @@ Resources:
             - GET
             - HEAD
           Compress: true
-          # AWS Managed CachingOptimized policy
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e28f6
         CustomErrorResponses:
           - ErrorCode: 403
@@ -128,11 +414,20 @@ Resources:
 
 Outputs:
   ApiBaseUrl:
-    Description: Base URL for the Sea Lion HTTP API
+    Description: Base URL for S.E.A.-L.I.O.N. HTTP API v2
     Value: !Sub "https://${SeaLionHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
   HealthEndpoint:
-    Description: Stage 1 /health check URL
-    Value: !Sub "https://${SeaLionHttpApi}.execute-api.${AWS::Region}.amazonaws.com/health"
+    Description: Stage 2 /api/health endpoint
+    Value: !Sub "https://${SeaLionHttpApi}.execute-api.${AWS::Region}.amazonaws.com/api/health"
+  InspectionsBucketName:
+    Description: Private S3 Inspections bucket
+    Value: !Ref SeaLionInspectionsBucket
+  InspectionsTableName:
+    Description: DynamoDB Inspections table
+    Value: !Ref SeaLionInspectionsTable
+  TelemetryTableName:
+    Description: DynamoDB Telemetry table
+    Value: !Ref SeaLionTelemetryTable
   FrontendBucketName:
     Description: S3 bucket name for Vite dist/ upload
     Value: !Ref FrontendBucket
